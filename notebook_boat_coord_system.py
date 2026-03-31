@@ -1,4 +1,4 @@
-"""A notebook to express DLC trajectories from birds in a boat coordinate system.
+"""A notebook to express cleaned DLC trajectories from birds in a boat coordinate system.
 
 Requirements: following installation instructions for `movement`
 https://movement.neuroinformatics.dev/latest/user_guide/installation.html
@@ -8,7 +8,6 @@ Then run this notebook in that conda environment.
 """
 # %%
 
-import glob
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -83,25 +82,6 @@ def get_data_for_load_from_numpy(df):
     )
 
     return position_array, confidence_array, list_individuals, list_keypoints
-
-
-def compute_rotation_to_align_xy_axis(x_axis_vec, y_axis_vec):
-    """Compute rotation that applied to input x,y vectors gives
-     ICS x,y vectors.
-
-    rot.apply(b) ~= a
-    """
-    rrot, _rssd = R.align_vectors(
-        np.r_[
-            np.array([[1, 0, 0]]), np.array([[0, 1, 0]])
-        ],  # Vector components observed in ICS ("a" vectors)
-        np.r_[
-            [x_axis_vec], [y_axis_vec]
-        ],  # Vector components observed in another frame ("b" vectors)
-        return_sensitivity=False,
-    )
-
-    return rrot
 
 
 def add_z_coord_to_position_array(position_array):
@@ -188,9 +168,6 @@ confidence_threshold = 0.5
 boat_position = filter_by_confidence(
     ds_boat.position, ds_boat.confidence, threshold=confidence_threshold
 )
-# birds_position = filter_by_confidence(
-#     ds_birds.position, ds_birds.confidence, threshold=confidence_threshold
-# ) ---> already done
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # Linearly interpolate boat points
@@ -203,9 +180,9 @@ boat_position_interp = interpolate_over_time(
 
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-# Compute rotation to BCS (boat coordinate system)
+# Compute axes of BCS (boat coordinate system)
 # - origin : centroid of all boat keypoints per frame
-# - y-axis: vector from boat centroid to tip keypoint
+# - y-axis: vector from boat centroid to boat tip keypoint
 # - x-axis: perpendicular to y-axis, points to right side of the boat
 
 # compute origin
@@ -221,7 +198,6 @@ boat_y_axis_3d = (
     .squeeze()
 )
 
-
 # compute boat z-axis
 # (negative of ICS z-axis, which is positive going into the paper)
 boat_z_axis_3d = xr.DataArray(data=[0, 0, -1], coords={"space": ["x", "y", "z"]})
@@ -230,41 +206,23 @@ boat_z_axis_3d = xr.DataArray(data=[0, 0, -1], coords={"space": ["x", "y", "z"]}
 boat_x_axis_3d = xr.cross(boat_y_axis_3d, boat_z_axis_3d, dim="space")
 
 
-# %%
-# Compute R that rotates boat axes back to standard axes
-# R.apply(boat_x_axis_3d) = [1,0,0]
-# R.apply(boat_axis) ≈ ics_axis (R maps boat vectors → ICS vectors)
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+# Compute rotation matrix from BCS axes to ICS axes == change of basis
+# matrix from ICS coordinates to BCS coordinates
+# R.apply(x_BCS) = x_ICS
+
+# The rotation is approximately a 180 deg rotation
+# about the x=y diagonal (axis x=1, y=1, z=0). It essentially
+# swaps x and y and flips z
+
 rotation2boat = xr.apply_ufunc(
-    lambda xv, yv: compute_rotation_to_align_xy_axis(xv, yv),
+    lambda xv, yv, zv: R.from_matrix(np.array([xv, yv, zv])),
     boat_x_axis_3d,
     boat_y_axis_3d,
-    input_core_dims=[["space"], ["space"]],
+    boat_z_axis_3d,
+    input_core_dims=[["space"], ["space"], ["space"]],
     vectorize=True,
 )
-
-
-def compute_rotation_to_BCS(x_axis_vec, y_axis_vec):
-    z_axis_vec = np.cross(x_axis_vec, y_axis_vec)
-    # cols of matrix are basis of BCS expressed in ICS
-    return R.from_matrix(np.array([x_axis_vec, y_axis_vec, z_axis_vec]))
-
-
-rotation2boat_2 = xr.apply_ufunc(
-    lambda xv, yv: compute_rotation_to_BCS(xv, yv),
-    boat_x_axis_3d,
-    boat_y_axis_3d,
-    input_core_dims=[["space"], ["space"]],
-    vectorize=True,
-)
-
-# # check equivalent:
-# xr.apply_ufunc(
-#     lambda r1, r2: r1.approx_equal(r2, atol=1e-8),
-#     rotation2boat,
-#     rotation2boat_2,
-#     vectorize=True,
-# ).all()
-
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # Compute bird keypoints in BCS (translated and rotated)
@@ -302,21 +260,25 @@ boat_position_BCS = boat_position_3d_BCS.drop_sel(space="z")
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # Apply scaling
 
-# Compute boat width and length per frame in pixels
+# Compute boat width per frame in pixels
 boat_width = compute_pairwise_distances(
-    boat_position_BCS, dim="keypoints", pairs={"boatBL": "boatBR"}
+    boat_position_BCS,
+    dim="keypoints",
+    pairs={"boatBL": "boatBR"},
 )
 # boat_width.name = "position"
 
-boat_midpoint_BL_BR = boat_position_BCS.sel(keypoints=["boatBL", "boatBR"]).mean(
-    dim="keypoints"
-)
+# Compute boat length per frame in pixels
+boat_midpoint_BL_BR = boat_position_BCS.sel(
+    keypoints=["boatBL", "boatBR"],
+).mean(dim="keypoints")
+
 boat_length = compute_norm(
     boat_position_BCS.sel(keypoints="boatTip") - boat_midpoint_BL_BR
 ).squeeze()
 
 
-# check with plot
+# check width, length variation with time
 plt.figure()
 boat_width.plot(label="width")
 boat_length.plot(label="length")
@@ -328,24 +290,27 @@ plt.legend()
 # Express spatial coordinates in meters
 
 # We use boat length to scale the data
-scale_factor = (
-    boat_max_length_in_m / boat_length
-)  # (boat_max_width_in_m / boat_width) - looks nosier
+# (boat_width looks a bit nosier)
+scale_factor = boat_max_length_in_m / boat_length
+
+# Express boat and bird coords in meters
 boat_position_BCS_in_m = boat_position_BCS * scale_factor
 birds_position_BCS_in_m = birds_position_BCS * scale_factor
 
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-# Plot data in BCS
+# Plot bird trajectories in BCS
 
-# Select a time slice for clarity (frames 0 to 654)
-time_slice = slice(0, 9000)
+# Select a time slice for clarity
+time_slice = slice(0, 8999)
 
 fig, ax = plt.subplots(1, 1)
 
 # plot bird data and color by individual
-cmap = plt.get_cmap("tab20")  # + plt.get_cmap("tab20")
-color_array = cmap(np.arange(len(birds_position_BCS_in_m.individuals)))
+# cmap = plt.get_cmap("tab20")  # + plt.get_cmap("tab20")
+# color_array = cmap(np.arange(len(birds_position_BCS_in_m.individuals)))
+colors = np.vstack([plt.get_cmap("tab20").colors, plt.get_cmap("tab20b").colors])
+color_array = colors[np.arange(len(birds_position_BCS_in_m.individuals)) % len(colors)]
 
 for i, ind in enumerate(birds_position_BCS_in_m.individuals):
     # bird centroids
@@ -368,7 +333,7 @@ sc = ax.scatter(
     boat_position_BCS_in_m.sel(time=time_slice, space="x").mean("keypoints"),
     boat_position_BCS_in_m.sel(time=time_slice, space="y").mean("keypoints"),
     10,
-    c=np.arange((time_slice.stop - time_slice.start)),
+    c=np.arange(time_slice.stop - time_slice.start +1),
     cmap="plasma",
     marker="*",
 )
@@ -379,7 +344,7 @@ for boat_keypoint in ["boatTip", "boatBL", "boatBR"]:
         boat_position_BCS_in_m.sel(time=time_slice, keypoints=boat_keypoint, space="x"),
         boat_position_BCS_in_m.sel(time=time_slice, keypoints=boat_keypoint, space="y"),
         10,
-        c=np.arange((time_slice.stop - time_slice.start)),
+        c=np.arange(time_slice.stop - time_slice.start + 1),
         cmap="plasma",
     )
 
@@ -391,8 +356,8 @@ ax.set_aspect("equal")
 cbar = fig.colorbar(sc, ax=ax)
 cbar.set_label("frames")
 
-# put legend top left
-ax.legend(loc="upper left")
+# put legend outside
+ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1))
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # Save movement datasets
