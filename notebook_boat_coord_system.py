@@ -285,7 +285,7 @@ birds_position_3d_BCS = xr.apply_ufunc(
 birds_position_BCS = birds_position_3d_BCS.drop_sel(space="z")
 
 # reorder coordinates (space is moved last after apply_ufunc)
-birds_position_BCS.transpose("time", "space", "keypoints", "individuals")
+birds_position_BCS = birds_position_BCS.transpose("time", "space", "keypoints", "individuals")
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # Apply same transform to boat points
@@ -303,7 +303,7 @@ boat_position_3d_BCS = xr.apply_ufunc(
 boat_position_BCS = boat_position_3d_BCS.drop_sel(space="z")
 
 # reorder coordinates (space is moved last after apply_ufunc)
-boat_position_BCS.transpose("time", "space", "keypoints", "individuals")
+boat_position_BCS = boat_position_BCS.transpose("time", "space", "keypoints", "individuals")
 
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # Apply scaling
